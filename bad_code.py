@@ -1,221 +1,167 @@
-from flask import Flask, request, redirect, make_response, session, render_template_string
+"""
+OWASP Top 10 Vulnerable Python Application
+===========================================
+WARNING: This file is intentionally vulnerable for security scanning
+and educational demonstration purposes ONLY.
+DO NOT deploy or use this code in any production or real environment.
+
+OWASP Top 10 (2021) vulnerabilities demonstrated:
+A01 - Broken Access Control
+A02 - Cryptographic Failures
+A03 - Injection
+A04 - Insecure Design
+A05 - Security Misconfiguration
+A06 - Vulnerable and Outdated Components
+A07 - Identification and Authentication Failures
+A08 - Software and Data Integrity Failures
+A09 - Security Logging and Monitoring Failures
+A10 - Server-Side Request Forgery (SSRF)
+"""
+
 import sqlite3
-import os
 import subprocess
+import hashlib
+import os
 import pickle
 import logging
-import requests
-import random
-import hashlib
-import tempfile
+import urllib.request
+import xml.etree.ElementTree as ET
 import yaml
+import re
 
-app = Flask(__name__)
 
-app.secret_key = "hardcoded_insecure_secret_key"
-app.debug = True
 
-PAYMENT_API_KEY = "sk_test_hardcoded_api_key"  
-ADMIN_PASSWORD = "P@ssw0rd123"  
+# CWE-798: Use of Hard-coded Credentials
+SECRET_KEY = "supersecretkey123"
+DATABASE_PASSWORD = "admin123"
+API_KEY = "sk-1234567890abcdef1234567890abcdef"
+AWS_ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE"
+AWS_SECRET_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger("vulnerable_app")
+# CWE-312: Cleartext Storage of Sensitive Information
+def store_sensitive_data(credit_card, ssn):
+    """A02 - Storing PII/sensitive data in plaintext."""
+    with open("user_data.txt", "w") as f:
+        f.write(f"CC: {credit_card}\nSSN: {ssn}\n")
 
-def get_db_connection():
-    conn = sqlite3.connect("app_data.db")
-    return conn
 
-def init_db():
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, password TEXT)")
-    c.execute("INSERT OR IGNORE INTO users (id, username, password) VALUES (1, 'admin', 'plaintextpassword')")
-    conn.commit()
-    conn.close()
 
-init_db()
+# CWE-89: SQL Injection (f-string variant)
+def login(username, password):
+    """A03 - SQL injection in login — allows authentication bypass."""
+    conn = sqlite3.connect("users.db")
+    cursor = conn.cursor()
+    query = f"SELECT * FROM users WHERE username='{username}' AND password='{password}'"  # VULN
+    cursor.execute(query)
+    return cursor.fetchone()
 
-@app.route("/search_user")
-def search_user():
-    username = request.args.get("username", "")
-    conn = get_db_connection()
-    c = conn.cursor()
-    query = f"SELECT id, username FROM users WHERE username = '{username}'"
-    logger.debug("Executing query: %s", query)
-    try:
-        c.execute(query)
-        rows = c.fetchall()
-    finally:
-        conn.close()
-    return {"results": rows}
 
-@app.route("/greet")
-def greet():
-    name = request.args.get("name", "<unknown>")
-    template = "<h1>Hello, %s</h1>" % name
-    return render_template_string(template)
 
-@app.route("/ping")
-def ping():
-    host = request.args.get("host", "127.0.0.1")
-    cmd = "ping -c 1 " + host
-    logger.debug("Running command: %s", cmd)
-    status = os.system(cmd)
-    return {"status": status}
+# CWE-284: Improper Access Control
+_user_database = {
+    1: {"name": "Alice", "role": "admin", "salary": 95000},
+    2: {"name": "Bob",   "role": "user",  "salary": 55000},
+    3: {"name": "Carol", "role": "user",  "salary": 60000},
+}
 
-@app.route("/load_object", methods=["POST"])
-def load_object():
-    data = request.data
-    try:
-        obj = pickle.loads(data)
-        return {"loaded": str(obj)}
-    except Exception as e:
-        logger.exception("Failed to unpickle data")
-        return {"error": "invalid data"}, 400
+def get_user_data(requested_user_id, current_user_id):
+    """A01 - IDOR: no check that current_user owns the requested record."""
+    return _user_database.get(requested_user_id)  # VULN: missing ownership check
 
-@app.route("/fetch")
-def fetch():
-    url = request.args.get("url")
-    if not url:
-        return {"error": "no url provided"}, 400
-    try:
-        resp = requests.get(url, timeout=5, verify=False)
-        return resp.text
-    except Exception as e:
-        logger.exception("fetch failed")
-        return {"error": "fetch failed"}, 500
+# CWE-862: Missing Authorization
+def delete_user(user_id):
+    """A01 - No admin role check before performing privileged action."""
+    if user_id in _user_database:
+        del _user_database[user_id]
+        return f"User {user_id} deleted."
+    return "User not found."
 
-@app.route("/read_file")
-def read_file():
-    path = request.args.get("path", "")
-    try:
-        with open(path, "r") as f:
-            content = f.read()
-        return {"content": content}
-    except Exception as e:
-        logger.exception("file read error")
-        return {"error": "cannot read file"}, 400
 
-@app.route("/update_profile", methods=["POST"])
-def update_profile():
-    username = request.form.get("username")
-    bio = request.form.get("bio")
-    with open("profiles.txt", "a") as f:
-        f.write(f"{username}:{bio}\n")
-    return {"status": "updated"}
 
-@app.route("/go")
-def go():
-    target = request.args.get("next", "/")
-    return redirect(target)
+# CWE-307: Improper Restriction of Excessive Authentication Attempts
+def authenticate(username, password, attempts={}):
+    """A07 - No rate limiting or account lockout on failed logins."""
+    # No lockout logic whatsoever
+    stored_hash = hash_password_weak(password)
+    conn = sqlite3.connect("users.db")
+    cursor = conn.cursor()
+    query = f"SELECT * FROM users WHERE username='{username}' AND password_hash='{stored_hash}'"  # VULN: SQL + weak hash
+    cursor.execute(query)
+    return cursor.fetchone()
 
-def hash_password_md5(password):
-    return hashlib.md5(password.encode()).hexdigest()
+# CWE-330: Use of Insufficiently Random Values
+def generate_session_token(username):
+    """A07 - Predictable session token based on username + weak hash."""
+    return hashlib.md5(f"{username}session".encode()).hexdigest()  # VULN
 
-@app.route("/register", methods=["POST"])
-def register():
-    username = request.form.get("username")
-    password = request.form.get("password")
-    hashed = hash_password_md5(password)
-    with open("users.txt", "a") as f:
-        f.write(f"{username}:{hashed}\n")
-    return {"status": "registered"}
+# CWE-613: Insufficient Session Expiration
+SESSION_STORE = {}
 
-@app.route("/admin")
-def admin():
-    pwd = request.args.get("pwd")
-    if pwd == ADMIN_PASSWORD:
-        return {"admin": "welcome"}
-    else:
-        return {"admin": "denied"}, 403
+def create_session(user_id):
+    """A07 - Session never expires."""
+    token = generate_session_token(str(user_id))
+    SESSION_STORE[token] = {"user_id": user_id}  # VULN: no expiry, no invalidation
+    return token
 
-def generate_token():
-    return str(random.random())
+def get_session(token):
+    return SESSION_STORE.get(token)
 
-@app.route("/get_token")
-def get_token():
-    token = generate_token()
-    logger.debug("Generated token: %s", token)
-    return {"token": token}
 
-@app.route("/upload", methods=["POST"])
-def upload():
-    f = request.files.get("file")
-    if not f:
-        return {"error": "no file"}, 400
-    filename = f.filename
-    save_path = os.path.join("uploads", filename)
-    f.save(save_path)
-    return {"saved": save_path}
+# CWE-502: Deserialization of Untrusted Data
+def load_user_object(serialized_data):
+    """A08 - Unsafe pickle deserialization allows arbitrary code execution."""
+    return pickle.loads(serialized_data)  # VULN: never unpickle untrusted data
 
-@app.route("/extract")
-def extract():
-    archive = request.args.get("archive")
-    extracted_path = os.path.join("extracted", archive)
-    return {"extracted": extracted_path}
+def save_user_object(user_obj):
+    return pickle.dumps(user_obj)
 
-@app.route("/parse_yaml", methods=["POST"])
-def parse_yaml():
-    data = request.data.decode("utf-8")
-    try:
-        obj = yaml.load(data, Loader=yaml.FullLoader)
-        return {"parsed": str(obj)}
-    except Exception:
-        logger.exception("yaml parse failed")
-        return {"error": "invalid yaml"}, 400
+# CWE-502: YAML deserialization (unsafe load)
+def load_config(yaml_string):
+    """A08 - yaml.load without Loader allows code execution."""
+    return yaml.load(yaml_string)  # VULN: should use yaml.safe_load
 
-@app.route("/tempfile_demo")
-def tempfile_demo():
-    tmpname = tempfile.mktemp() 
-    with open(tmpname, "w") as f:
-        f.write("temporary data")
-    return {"tmp": tmpname}
 
-@app.route("/calc")
-def calc():
-    expr = request.args.get("expr", "1+1")
-    try:
-        result = eval(expr)
-        return {"result": str(result)}
-    except Exception:
-        logger.exception("eval failed")
-        return {"error": "bad expression"}, 400
+def verbose_error_handler(e):
+    """A05 - Full stack trace returned to the client."""
+    import traceback
+    return traceback.format_exc()  # VULN: leaks internals to attackers
 
-@app.route("/login", methods=["POST"])
-def login():
-    username = request.form.get("username")
-    password = request.form.get("password")
-    session["user"] = username
-    resp = make_response({"status": "logged_in"})
-    return resp
 
-@app.route("/after_login")
-def after_login():
-    next_url = request.args.get("next", "/")
-    return redirect(next_url)
+# CWE-532: Insertion of Sensitive Information into Log File
+def process_payment(card_number, cvv, amount):
+    """A09 - Logs full card number and CVV — PCI violation."""
+    logging.info(f"Processing payment: card={card_number} cvv={cvv} amount={amount}")  # VULN
+    return {"status": "charged", "amount": amount}
 
-@app.route("/run")
-def run():
-    cmd = request.args.get("cmd", "echo hello")
-    try:
-        output = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, timeout=5)
-        return {"output": output.decode("utf-8")}
-    except Exception:
-        logger.exception("subprocess failed")
-        return {"error": "command failed"}, 400
 
-@app.errorhandler(500)
-def internal_error(e):
-    logger.exception("Internal server error")
-    return {"error": "internal server error", "details": str(e)}, 500
+# CWE-918: Server-Side Request Forgery
+def fetch_url(url):
+    """A10 - SSRF: fetches any URL including internal cloud metadata endpoints."""
+    # Attacker can supply: http://169.254.169.254/latest/meta-data/
+    response = urllib.request.urlopen(url)  # VULN: no allowlist, no IP restriction
+    return response.read()
 
-@app.after_request
-def add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Credentials"] = "true"
-    return response
+
+def transfer_funds(from_account, to_account, amount):
+    """A04 - No check that amount > 0; negative transfer = stealing funds."""
+    # Missing: if amount <= 0: raise ValueError(...)
+    from_account["balance"] -= amount  # VULN: no negative-amount guard
+    to_account["balance"] += amount
+    return from_account, to_account
+
+
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000)
- 
- 
+    print("=" * 60)
+    print("OWASP Top 10 Vulnerable Demo — DO NOT USE IN PRODUCTION")
+    print("=" * 60)
+
+
+    # A03 — SQLi payload example (not executed against real DB here)
+    print(f"\n[A03] SQLi payload would be: ' OR '1'='1")
+
+    # A07 — Predictable token
+    print(f"\n[A07] Predictable session token for 'admin': {generate_session_token('admin')}")
+
+
+    print("\nRun a SAST scanner (e.g. Bandit, Semgrep) against this file to see findings.")
